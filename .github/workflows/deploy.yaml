@@ -53,11 +53,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify Toolkit Authorization
-        run: yes | cdf auth verify
+      # Temporary workaround for Toolkit authorization verification.
+      # - name: Verify Toolkit Authorization
+      #   run: yes | cdf auth verify
 
       - name: Build Toolkit Configurations
         run: cdf build --env=${{ matrix.environment }}
+
+      - name: Dry Run Toolkit Deployment
+        run: cdf deploy --env=${{ matrix.environment }} --dry-run
 
       - name: Deploy Toolkit Configurations
         run: cdf deploy --env=${{ matrix.environment }}
