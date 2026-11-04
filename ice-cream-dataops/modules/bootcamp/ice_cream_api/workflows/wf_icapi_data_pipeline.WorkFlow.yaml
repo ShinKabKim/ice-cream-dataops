@@ -1,0 +1,3 @@
+
+externalId: wf_icapi_data_pipeline
+description: Orchestrates asset hierarchy creation, time series contextualization, data point extraction, and OEE calculation.
