@@ -25,7 +25,7 @@ jobs:
       ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
 
     steps:
-      - name: Check Jobs Permissions Sessions and Metrics
+      - name: Diagnose Jobs Sessions Metrics and View Access
         shell: bash
         run: |
           python - <<'PY'
@@ -58,7 +58,6 @@ jobs:
           def format_time(milliseconds):
               if milliseconds is None:
                   return "N/A"
-
               return datetime.fromtimestamp(
                   milliseconds / 1000,
                   tz=timezone.utc,
@@ -85,7 +84,6 @@ jobs:
               section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
 
               inspection = client.iam.token.inspect()
-
               print("Authentication: SUCCESS")
               print("Project:", PROJECT)
 
@@ -96,10 +94,6 @@ jobs:
                   "timeSeriesAcl",
                   "sessionsAcl",
               }
-
-              capabilities = inspection.dump().get(
-                  "capabilities", []
-              )
 
               found = set()
 
@@ -118,7 +112,9 @@ jobs:
                       for value in item:
                           inspect_capability(value)
 
-              inspect_capability(capabilities)
+              inspect_capability(
+                  inspection.dump().get("capabilities", [])
+              )
 
               for name in sorted(relevant - found):
                   print("NOT FOUND:", name)
@@ -220,9 +216,7 @@ jobs:
                       print("SESSION TYPE:", session.type)
                       print(
                           "SESSION EXPIRES:",
-                          format_time(
-                              session.expiration_time
-                          ),
+                          format_time(session.expiration_time),
                       )
 
                       actual_client_id = (
@@ -232,8 +226,7 @@ jobs:
                       if actual_client_id:
                           print(
                               "CLIENT ID MATCH:",
-                              actual_client_id
-                              == expected_client_id,
+                              actual_client_id == expected_client_id,
                           )
                       else:
                           print("CLIENT ID MATCH: UNKNOWN")
@@ -300,6 +293,58 @@ jobs:
                   )
                   print("DETAIL:", str(error)[:500])
 
+          def inspect_view_access(admin_client, extractor_client):
+              section("COGNITE TIMESERIES VIEW ACCESS")
+
+              view_id = (
+                  "cdf_cdm",
+                  "CogniteTimeSeries",
+                  "v1",
+              )
+
+              for label, client in [
+                  ("ADMIN", admin_client),
+                  ("EXTRACTOR", extractor_client),
+              ]:
+                  print()
+                  print("ACCOUNT:", label)
+
+                  try:
+                      views = client.data_modeling.views.retrieve(
+                          view_id
+                      )
+
+                      print("VIEW COUNT:", len(views))
+
+                      for view in views:
+                          print(
+                              "VIEW SPACE:",
+                              view.space,
+                          )
+                          print(
+                              "VIEW EXTERNAL ID:",
+                              view.external_id,
+                          )
+                          print(
+                              "VIEW VERSION:",
+                              view.version,
+                          )
+
+                      if len(views) == 0:
+                          print("RESULT: VIEW NOT FOUND OR NOT VISIBLE")
+                      else:
+                          print("RESULT: VIEW READ SUCCESS")
+
+                  except Exception as error:
+                      print("RESULT: VIEW READ FAILED")
+                      print(
+                          "ERROR TYPE:",
+                          type(error).__name__,
+                      )
+                      print("DETAIL:", str(error)[:500])
+
+                  print("-" * 40)
+
           def main():
               section("PROD DIAGNOSTIC START")
 
@@ -327,6 +372,11 @@ jobs:
               inspect_sessions(admin_client)
 
               inspect_metrics(admin_client)
+
+              inspect_view_access(
+                  admin_client,
+                  extractor_client,
+              )
 
               section("DIAGNOSIS FINISHED")
 
