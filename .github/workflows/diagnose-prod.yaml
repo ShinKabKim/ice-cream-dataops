@@ -25,7 +25,7 @@ jobs:
       ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
 
     steps:
-      - name: Check Jobs Permissions and Sessions
+      - name: Check Jobs Permissions Sessions and Metrics
         shell: bash
         run: |
           python - <<'PY'
@@ -58,6 +58,7 @@ jobs:
           def format_time(milliseconds):
               if milliseconds is None:
                   return "N/A"
+
               return datetime.fromtimestamp(
                   milliseconds / 1000,
                   tz=timezone.utc,
@@ -84,6 +85,7 @@ jobs:
               section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
 
               inspection = client.iam.token.inspect()
+
               print("Authentication: SUCCESS")
               print("Project:", PROJECT)
 
@@ -170,6 +172,7 @@ jobs:
                           "LOG CHECK FAILED:",
                           type(error).__name__,
                       )
+                      print("DETAIL:", str(error)[:300])
 
           def inspect_sessions(client):
               section("DESTINATION SESSION VALIDATION")
@@ -233,24 +236,73 @@ jobs:
                               == expected_client_id,
                           )
                       else:
-                          print(
-                              "CLIENT ID MATCH: UNKNOWN"
-                          )
+                          print("CLIENT ID MATCH: UNKNOWN")
 
                   except Exception as error:
                       print(
                           "SESSION CHECK FAILED:",
                           type(error).__name__,
                       )
-                      print(
-                          "DETAIL:",
-                          str(error)[:300],
-                      )
+                      print("DETAIL:", str(error)[:300])
 
                   print("-" * 40)
 
+          def inspect_metrics(client):
+              section("TIME SERIES JOB METRICS")
+
+              try:
+                  metrics = client.hosted_extractors.jobs.list_metrics(
+                      job="ICAPI Time series",
+                      limit=20,
+                  )
+
+                  print("METRIC RECORDS:", len(metrics))
+
+                  for metric in metrics:
+                      print(
+                          "TIME:",
+                          format_time(metric.timestamp),
+                      )
+                      print(
+                          "SOURCE MESSAGES:",
+                          metric.source_messages,
+                      )
+                      print(
+                          "CDF INPUT VALUES:",
+                          metric.cdf_input_values,
+                      )
+                      print(
+                          "CDF REQUESTS:",
+                          metric.cdf_requests,
+                      )
+                      print(
+                          "CDF UPLOADED VALUES:",
+                          metric.cdf_uploaded_values,
+                      )
+                      print(
+                          "CDF FAILED VALUES:",
+                          metric.cdf_failed_values,
+                      )
+                      print(
+                          "CDF WRITE FAILURES:",
+                          metric.cdf_write_failures,
+                      )
+                      print(
+                          "TRANSFORM FAILURES:",
+                          metric.transform_failures,
+                      )
+                      print("-" * 40)
+
+              except Exception as error:
+                  print(
+                      "METRICS CHECK FAILED:",
+                      type(error).__name__,
+                  )
+                  print("DETAIL:", str(error)[:500])
+
           def main():
               section("PROD DIAGNOSTIC START")
+
               print("PROJECT:", PROJECT)
               print("CLUSTER:", CLUSTER)
 
@@ -273,6 +325,8 @@ jobs:
               inspect_logs(admin_client, jobs)
 
               inspect_sessions(admin_client)
+
+              inspect_metrics(admin_client)
 
               section("DIAGNOSIS FINISHED")
 
