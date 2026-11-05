@@ -25,13 +25,12 @@ jobs:
       ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
 
     steps:
-      - name: Check Jobs Permissions and Destination Sessions
+      - name: Check Jobs Permissions and Sessions
         shell: bash
         run: |
           python - <<'PY'
           import os
           import sys
-          import traceback
           from datetime import datetime, timezone
 
           from cognite.client import CogniteClient, ClientConfig
@@ -56,6 +55,14 @@ jobs:
               print(title)
               print("=" * 60, flush=True)
 
+          def format_time(milliseconds):
+              if milliseconds is None:
+                  return "N/A"
+              return datetime.fromtimestamp(
+                  milliseconds / 1000,
+                  tz=timezone.utc,
+              ).isoformat()
+
           def create_client(client_id, client_secret, name):
               credentials = OAuthClientCredentials(
                   token_url=TOKEN_URL,
@@ -73,18 +80,10 @@ jobs:
 
               return CogniteClient(config)
 
-          def format_time(milliseconds):
-              if milliseconds is None:
-                  return "N/A"
-
-              return datetime.fromtimestamp(
-                  milliseconds / 1000,
-                  tz=timezone.utc,
-              ).isoformat()
-
           def inspect_permissions(client):
-              inspection = client.iam.token.inspect()
+              section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
 
+              inspection = client.iam.token.inspect()
               print("Authentication: SUCCESS")
               print("Project:", PROJECT)
 
@@ -93,6 +92,7 @@ jobs:
                   "dataModelInstancesAcl",
                   "rawAcl",
                   "timeSeriesAcl",
+                  "sessionsAcl",
               }
 
               capabilities = inspection.dump().get(
@@ -121,8 +121,6 @@ jobs:
               for name in sorted(relevant - found):
                   print("NOT FOUND:", name)
 
-              print("Permission inspection completed.")
-
           def inspect_jobs(client):
               section("HOSTED EXTRACTOR JOBS")
 
@@ -148,11 +146,9 @@ jobs:
                   print("JOB:", job.external_id)
 
                   try:
-                      logs = (
-                          client.hosted_extractors.jobs.list_logs(
-                              job=job.external_id,
-                              limit=10,
-                          )
+                      logs = client.hosted_extractors.jobs.list_logs(
+                          job=job.external_id,
+                          limit=10,
                       )
 
                       for log in logs:
@@ -171,58 +167,90 @@ jobs:
 
                   except Exception as error:
                       print(
-                          "LOG ERROR:",
+                          "LOG CHECK FAILED:",
                           type(error).__name__,
-                          str(error)[:500],
                       )
 
-          def inspect_destinations(client):
-              section("DESTINATION SESSIONS")
+          def inspect_sessions(client):
+              section("DESTINATION SESSION VALIDATION")
 
-              try:
-                  destinations = (
-                      client.hosted_extractors.destinations.list(
-                          limit=100
-                      )
+              destinations = (
+                  client.hosted_extractors.destinations.list(
+                      limit=100
+                  )
+              )
+
+              expected_client_id = os.environ[
+                  "ICAPI_EXTRACTORS_CLIENT_ID"
+              ].strip().lower()
+
+              for dest in destinations:
+                  print()
+                  print("DESTINATION:", dest.external_id)
+                  print(
+                      "SESSION ID:",
+                      getattr(dest, "session_id", None),
+                  )
+                  print(
+                      "DESTINATION UPDATED:",
+                      format_time(
+                          getattr(
+                              dest, "last_updated_time", None
+                          )
+                      ),
                   )
 
-                  for dest in destinations:
-                      print(
-                          "DESTINATION:",
-                          dest.external_id,
-                      )
-                      print(
-                          "SESSION ID:",
-                          getattr(dest, "session_id", None),
-                      )
-                      print(
-                          "LAST UPDATED:",
-                          format_time(
-                              getattr(
-                                  dest,
-                                  "last_updated_time",
-                                  None,
-                              )
-                          ),
-                      )
-                      print(
-                          "TARGET DATA SET ID:",
-                          getattr(
-                              dest,
-                              "target_data_set_id",
-                              None,
-                          ),
-                      )
-                      print("-" * 40)
+                  session_id = getattr(
+                      dest, "session_id", None
+                  )
 
-              except Exception as error:
-                  print("DESTINATION CHECK FAILED")
-                  print("ERROR TYPE:", type(error).__name__)
-                  print("ERROR:", str(error)[:1000])
+                  if session_id is None:
+                      print("SESSION STATUS: NOT CONFIGURED")
+                      continue
+
+                  try:
+                      session = client.iam.sessions.retrieve(
+                          id=int(session_id)
+                      )
+
+                      print("SESSION STATUS:", session.status)
+                      print("SESSION TYPE:", session.type)
+                      print(
+                          "SESSION EXPIRES:",
+                          format_time(
+                              session.expiration_time
+                          ),
+                      )
+
+                      actual_client_id = (
+                          session.client_id or ""
+                      ).strip().lower()
+
+                      if actual_client_id:
+                          print(
+                              "CLIENT ID MATCH:",
+                              actual_client_id
+                              == expected_client_id,
+                          )
+                      else:
+                          print(
+                              "CLIENT ID MATCH: UNKNOWN"
+                          )
+
+                  except Exception as error:
+                      print(
+                          "SESSION CHECK FAILED:",
+                          type(error).__name__,
+                      )
+                      print(
+                          "DETAIL:",
+                          str(error)[:300],
+                      )
+
+                  print("-" * 40)
 
           def main():
               section("PROD DIAGNOSTIC START")
-
               print("PROJECT:", PROJECT)
               print("CLUSTER:", CLUSTER)
 
@@ -238,26 +266,21 @@ jobs:
                   "prod-extractor-diagnostics",
               )
 
-              section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
-
-              try:
-                  inspect_permissions(extractor_client)
-              except Exception as error:
-                  print("PERMISSION CHECK FAILED")
-                  print("ERROR TYPE:", type(error).__name__)
-                  print("ERROR:", str(error)[:1000])
+              inspect_permissions(extractor_client)
 
               jobs = inspect_jobs(admin_client)
 
               inspect_logs(admin_client, jobs)
 
-              inspect_destinations(admin_client)
+              inspect_sessions(admin_client)
 
               section("DIAGNOSIS FINISHED")
 
           try:
               main()
-          except Exception:
-              traceback.print_exc()
+          except Exception as error:
+              print("DIAGNOSIS FAILED")
+              print("ERROR TYPE:", type(error).__name__)
+              print("DETAIL:", str(error)[:500])
               sys.exit(1)
           PY
