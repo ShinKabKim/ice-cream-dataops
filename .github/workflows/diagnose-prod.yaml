@@ -6,7 +6,7 @@ on:
 
 jobs:
   diagnose:
-    name: Check Hosted Extractor Jobs
+    name: Check Time Series Ingestion
     runs-on: ubuntu-latest
     environment: prod
 
@@ -17,20 +17,17 @@ jobs:
       CDF_PROJECT: cdf-bootcamp-41-prod
       CDF_CLUSTER: westeurope-1
       IDP_TENANT_ID: 16e3985b-ebe8-4e24-9da4-933e21a9fc81
-
       IDP_CLIENT_ID: ${{ vars.IDP_CLIENT_ID }}
       IDP_CLIENT_SECRET: ${{ secrets.IDP_CLIENT_SECRET }}
 
-      ICAPI_EXTRACTORS_CLIENT_ID: ${{ vars.ICAPI_EXTRACTORS_CLIENT_ID }}
-      ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
-
     steps:
-      - name: Diagnose Jobs Sessions Metrics and View Access
+      - name: Diagnose Time Series Job and Mapping
         shell: bash
         run: |
           python - <<'PY'
           import os
           import sys
+          import traceback
           from datetime import datetime, timezone
 
           from cognite.client import CogniteClient, ClientConfig
@@ -39,14 +36,28 @@ jobs:
 
           global_config.disable_pypi_version_check = True
 
-          PROJECT = os.environ["CDF_PROJECT"]
-          CLUSTER = os.environ["CDF_CLUSTER"]
-          TENANT = os.environ["IDP_TENANT_ID"]
+          project = os.environ["CDF_PROJECT"]
+          cluster = os.environ["CDF_CLUSTER"]
+          tenant = os.environ["IDP_TENANT_ID"]
+          base_url = f"https://{cluster}.cognitedata.com"
 
-          BASE_URL = f"https://{CLUSTER}.cognitedata.com"
-          TOKEN_URL = (
-              f"https://login.microsoftonline.com/"
-              f"{TENANT}/oauth2/v2.0/token"
+          credentials = OAuthClientCredentials(
+              token_url=(
+                  f"https://login.microsoftonline.com/"
+                  f"{tenant}/oauth2/v2.0/token"
+              ),
+              client_id=os.environ["IDP_CLIENT_ID"],
+              client_secret=os.environ["IDP_CLIENT_SECRET"],
+              scopes=[f"{base_url}/.default"],
+          )
+
+          client = CogniteClient(
+              ClientConfig(
+                  client_name="prod-timeseries-diagnostics",
+                  project=project,
+                  credentials=credentials,
+                  base_url=base_url,
+              )
           )
 
           def section(title):
@@ -55,336 +66,128 @@ jobs:
               print(title)
               print("=" * 60, flush=True)
 
-          def format_time(milliseconds):
-              if milliseconds is None:
+          def format_time(ms):
+              if ms is None:
                   return "N/A"
               return datetime.fromtimestamp(
-                  milliseconds / 1000,
-                  tz=timezone.utc,
+                  ms / 1000, tz=timezone.utc
               ).isoformat()
 
-          def create_client(client_id, client_secret, name):
-              credentials = OAuthClientCredentials(
-                  token_url=TOKEN_URL,
-                  client_id=client_id,
-                  client_secret=client_secret,
-                  scopes=[f"{BASE_URL}/.default"],
+          def check_job():
+              section("TIME SERIES JOB STATUS")
+
+              job = client.hosted_extractors.jobs.retrieve(
+                  "ICAPI Time series"
               )
 
-              config = ClientConfig(
-                  client_name=name,
-                  project=PROJECT,
-                  credentials=credentials,
-                  base_url=BASE_URL,
+              print("JOB:", job.external_id)
+              print("STATUS:", job.status)
+              print("TARGET:", job.target_status)
+              print("SOURCE:", job.source_id)
+              print("DESTINATION:", job.destination_id)
+
+              print("FORMAT:", job.format.dump())
+              print("CONFIG:", job.config.dump())
+
+          def check_logs():
+              section("TIME SERIES JOB LOGS")
+
+              logs = client.hosted_extractors.jobs.list_logs(
+                  job="ICAPI Time series",
+                  limit=10,
               )
 
-              return CogniteClient(config)
-
-          def inspect_permissions(client):
-              section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
-
-              inspection = client.iam.token.inspect()
-              print("Authentication: SUCCESS")
-              print("Project:", PROJECT)
-
-              relevant = {
-                  "dataModelsAcl",
-                  "dataModelInstancesAcl",
-                  "rawAcl",
-                  "timeSeriesAcl",
-                  "sessionsAcl",
-              }
-
-              found = set()
-
-              def inspect_capability(item):
-                  if isinstance(item, dict):
-                      for key, value in item.items():
-                          if key in relevant:
-                              found.add(key)
-                              print("CAPABILITY:", key)
-                              print("SETTINGS:", value)
-
-                          if isinstance(value, (dict, list)):
-                              inspect_capability(value)
-
-                  elif isinstance(item, list):
-                      for value in item:
-                          inspect_capability(value)
-
-              inspect_capability(
-                  inspection.dump().get("capabilities", [])
-              )
-
-              for name in sorted(relevant - found):
-                  print("NOT FOUND:", name)
-
-          def inspect_jobs(client):
-              section("HOSTED EXTRACTOR JOBS")
-
-              jobs = client.hosted_extractors.jobs.list(
-                  limit=100
-              )
-
-              for job in jobs:
-                  print("JOB:", job.external_id)
-                  print("STATUS:", job.status)
-                  print("TARGET:", job.target_status)
-                  print("SOURCE:", job.source_id)
-                  print("DESTINATION:", job.destination_id)
-                  print("-" * 40)
-
-              return jobs
-
-          def inspect_logs(client, jobs):
-              section("RECENT JOB LOGS")
-
-              for job in jobs:
-                  print()
-                  print("JOB:", job.external_id)
-
-                  try:
-                      logs = client.hosted_extractors.jobs.list_logs(
-                          job=job.external_id,
-                          limit=10,
-                      )
-
-                      for log in logs:
-                          print("TYPE:", log.type)
-                          print(
-                              "TIME:",
-                              format_time(
-                                  getattr(log, "created_time", None)
-                              ),
-                          )
-                          print(
-                              "MESSAGE:",
-                              str(log.message or "")[:500],
-                          )
-                          print("-" * 30)
-
-                  except Exception as error:
-                      print(
-                          "LOG CHECK FAILED:",
-                          type(error).__name__,
-                      )
-                      print("DETAIL:", str(error)[:300])
-
-          def inspect_sessions(client):
-              section("DESTINATION SESSION VALIDATION")
-
-              destinations = (
-                  client.hosted_extractors.destinations.list(
-                      limit=100
-                  )
-              )
-
-              expected_client_id = os.environ[
-                  "ICAPI_EXTRACTORS_CLIENT_ID"
-              ].strip().lower()
-
-              for dest in destinations:
-                  print()
-                  print("DESTINATION:", dest.external_id)
+              for log in logs:
+                  print("TYPE:", log.type)
                   print(
-                      "SESSION ID:",
-                      getattr(dest, "session_id", None),
-                  )
-                  print(
-                      "DESTINATION UPDATED:",
+                      "TIME:",
                       format_time(
-                          getattr(
-                              dest, "last_updated_time", None
-                          )
+                          getattr(log, "created_time", None)
                       ),
                   )
-
-                  session_id = getattr(
-                      dest, "session_id", None
-                  )
-
-                  if session_id is None:
-                      print("SESSION STATUS: NOT CONFIGURED")
-                      continue
-
-                  try:
-                      session = client.iam.sessions.retrieve(
-                          id=int(session_id)
-                      )
-
-                      print("SESSION STATUS:", session.status)
-                      print("SESSION TYPE:", session.type)
-                      print(
-                          "SESSION EXPIRES:",
-                          format_time(session.expiration_time),
-                      )
-
-                      actual_client_id = (
-                          session.client_id or ""
-                      ).strip().lower()
-
-                      if actual_client_id:
-                          print(
-                              "CLIENT ID MATCH:",
-                              actual_client_id == expected_client_id,
-                          )
-                      else:
-                          print("CLIENT ID MATCH: UNKNOWN")
-
-                  except Exception as error:
-                      print(
-                          "SESSION CHECK FAILED:",
-                          type(error).__name__,
-                      )
-                      print("DETAIL:", str(error)[:300])
-
+                  print("MESSAGE:", str(log.message or "")[:500])
                   print("-" * 40)
 
-          def inspect_metrics(client):
+          def check_metrics():
               section("TIME SERIES JOB METRICS")
 
-              try:
-                  metrics = client.hosted_extractors.jobs.list_metrics(
-                      job="ICAPI Time series",
-                      limit=20,
-                  )
-
-                  print("METRIC RECORDS:", len(metrics))
-
-                  for metric in metrics:
-                      print(
-                          "TIME:",
-                          format_time(metric.timestamp),
-                      )
-                      print(
-                          "SOURCE MESSAGES:",
-                          metric.source_messages,
-                      )
-                      print(
-                          "CDF INPUT VALUES:",
-                          metric.cdf_input_values,
-                      )
-                      print(
-                          "CDF REQUESTS:",
-                          metric.cdf_requests,
-                      )
-                      print(
-                          "CDF UPLOADED VALUES:",
-                          metric.cdf_uploaded_values,
-                      )
-                      print(
-                          "CDF FAILED VALUES:",
-                          metric.cdf_failed_values,
-                      )
-                      print(
-                          "CDF WRITE FAILURES:",
-                          metric.cdf_write_failures,
-                      )
-                      print(
-                          "TRANSFORM FAILURES:",
-                          metric.transform_failures,
-                      )
-                      print("-" * 40)
-
-              except Exception as error:
-                  print(
-                      "METRICS CHECK FAILED:",
-                      type(error).__name__,
-                  )
-                  print("DETAIL:", str(error)[:500])
-
-          def inspect_view_access(admin_client, extractor_client):
-              section("COGNITE TIMESERIES VIEW ACCESS")
-
-              view_id = (
-                  "cdf_cdm",
-                  "CogniteTimeSeries",
-                  "v1",
+              metrics = client.hosted_extractors.jobs.list_metrics(
+                  job="ICAPI Time series",
+                  limit=5,
               )
 
-              for label, client in [
-                  ("ADMIN", admin_client),
-                  ("EXTRACTOR", extractor_client),
-              ]:
-                  print()
-                  print("ACCOUNT:", label)
+              print("METRIC RECORDS:", len(metrics))
 
-                  try:
-                      views = client.data_modeling.views.retrieve(
-                          view_id
-                      )
-
-                      print("VIEW COUNT:", len(views))
-
-                      for view in views:
-                          print(
-                              "VIEW SPACE:",
-                              view.space,
-                          )
-                          print(
-                              "VIEW EXTERNAL ID:",
-                              view.external_id,
-                          )
-                          print(
-                              "VIEW VERSION:",
-                              view.version,
-                          )
-
-                      if len(views) == 0:
-                          print("RESULT: VIEW NOT FOUND OR NOT VISIBLE")
-                      else:
-                          print("RESULT: VIEW READ SUCCESS")
-
-                  except Exception as error:
-                      print("RESULT: VIEW READ FAILED")
-                      print(
-                          "ERROR TYPE:",
-                          type(error).__name__,
-                      )
-                      print("DETAIL:", str(error)[:500])
-
+              for m in metrics:
+                  print("TIME:", format_time(m.timestamp))
+                  print("SOURCE MESSAGES:", m.source_messages)
+                  print("CDF INPUT VALUES:", m.cdf_input_values)
+                  print("CDF REQUESTS:", m.cdf_requests)
+                  print(
+                      "CDF SKIPPED VALUES:",
+                      getattr(m, "cdf_skipped_values", "N/A"),
+                  )
+                  print(
+                      "CDF UPLOADED VALUES:",
+                      m.cdf_uploaded_values,
+                  )
+                  print(
+                      "CDF FAILED VALUES:",
+                      m.cdf_failed_values,
+                  )
+                  print(
+                      "CDF WRITE FAILURES:",
+                      m.cdf_write_failures,
+                  )
+                  print(
+                      "TRANSFORM FAILURES:",
+                      m.transform_failures,
+                  )
                   print("-" * 40)
 
-          def main():
-              section("PROD DIAGNOSTIC START")
+          def check_mapping():
+              section("DEPLOYED TIME SERIES MAPPING")
 
-              print("PROJECT:", PROJECT)
-              print("CLUSTER:", CLUSTER)
-
-              admin_client = create_client(
-                  os.environ["IDP_CLIENT_ID"],
-                  os.environ["IDP_CLIENT_SECRET"],
-                  "prod-admin-diagnostics",
+              mapping = client.hosted_extractors.mappings.retrieve(
+                  "ICAPI Time series"
               )
 
-              extractor_client = create_client(
-                  os.environ["ICAPI_EXTRACTORS_CLIENT_ID"],
-                  os.environ["ICAPI_EXTRACTORS_CLIENT_SECRET"],
-                  "prod-extractor-diagnostics",
+              print("MAPPING ID:", mapping.external_id)
+              print("PUBLISHED:", mapping.published)
+              print("INPUT:", mapping.input.dump())
+              print("EXPRESSION:")
+              print(mapping.mapping.expression)
+              print(
+                  "LAST UPDATED:",
+                  format_time(mapping.last_updated_time),
               )
 
-              inspect_permissions(extractor_client)
+          section("PROD DIAGNOSTIC START")
+          print("PROJECT:", project)
+          print("CLUSTER:", cluster)
 
-              jobs = inspect_jobs(admin_client)
+          checks = [
+              check_job,
+              check_logs,
+              check_metrics,
+              check_mapping,
+          ]
 
-              inspect_logs(admin_client, jobs)
+          failures = 0
 
-              inspect_sessions(admin_client)
+          for check in checks:
+              try:
+                  check()
+              except Exception as error:
+                  failures += 1
+                  print("CHECK FAILED:", check.__name__)
+                  print("ERROR TYPE:", type(error).__name__)
+                  print("DETAIL:", str(error)[:500])
+                  traceback.print_exc()
 
-              inspect_metrics(admin_client)
+          section("DIAGNOSIS FINISHED")
+          print("FAILED CHECKS:", failures)
 
-              inspect_view_access(
-                  admin_client,
-                  extractor_client,
-              )
-
-              section("DIAGNOSIS FINISHED")
-
-          try:
-              main()
-          except Exception as error:
-              print("DIAGNOSIS FAILED")
-              print("ERROR TYPE:", type(error).__name__)
-              print("DETAIL:", str(error)[:500])
+          if failures:
               sys.exit(1)
           PY
