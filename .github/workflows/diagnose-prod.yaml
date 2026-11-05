@@ -52,6 +52,48 @@ jobs:
           )
 
           print("PROJECT:", client.config.project)
+
+          print("\n=== EXTRACTOR SERVICE ACCOUNT PERMISSIONS ===")
+
+            extractor_credentials = OAuthClientCredentials(
+                token_url=(
+                    "https://login.microsoftonline.com/"
+                    + os.environ["IDP_TENANT_ID"]
+                    + "/oauth2/v2.0/token"
+                ),
+                client_id=os.environ["ICAPI_EXTRACTORS_CLIENT_ID"],
+                client_secret=os.environ["ICAPI_EXTRACTORS_CLIENT_SECRET"],
+                scopes=[f"{base_url}/.default"],
+            )
+
+            extractor_client = CogniteClient(
+                ClientConfig(
+                    client_name="prod-extractor-permission-check",
+                    project=os.environ["CDF_PROJECT"],
+                    credentials=extractor_credentials,
+                    base_url=base_url,
+                )
+            )
+
+            inspection = extractor_client.iam.token.inspect()
+
+            print("Authentication: SUCCESS")
+            print("Project:", extractor_client.config.project)
+
+            relevant = {
+                "dataModelsAcl",
+                "dataModelInstancesAcl",
+                "rawAcl",
+                "timeSeriesAcl",
+            }
+
+            for capability in inspection.dump().get("capabilities", []):
+                if isinstance(capability, dict):
+                    for name, settings in capability.items():
+                        if name in relevant:
+                            print("CAPABILITY:", name)
+                            print("SETTINGS:", settings)
+
           print("\n=== HOSTED EXTRACTOR JOBS ===")
 
           jobs = client.hosted_extractors.jobs.list(limit=100)
@@ -78,16 +120,6 @@ jobs:
                       "TYPE:", log.type,
                       "| MESSAGE:", str(log.message or "")[:500],
                   )
-
-
-                  print("\n=== DESTINATION CLIENT ID CHECK ===")
-
-for destination_id in ["ICAPI Time series", "ICAPI Assets"]:
-    destination = client.hosted_extractors.destinations.retrieve(
-        external_id=destination_id
-    )
-    print("DESTINATION:", destination_id)
-    print("CLIENT ID:", destination.credentials.client_id)
 
           print("\n=== DIAGNOSIS FINISHED ===")
           PY
