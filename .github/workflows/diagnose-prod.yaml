@@ -1,0 +1,83 @@
+
+name: Diagnose Prod Hosted Extractors
+
+on:
+  workflow_dispatch:
+
+jobs:
+  diagnose:
+    name: Check Hosted Extractor Jobs
+    runs-on: ubuntu-latest
+    environment: prod
+    container:
+      image: cognite/toolkit:0.6.53
+
+    env:
+      CDF_PROJECT: cdf-bootcamp-41-prod
+      CDF_CLUSTER: westeurope-1
+      IDP_TENANT_ID: 16e3985b-ebe8-4e24-9da4-933e21a9fc81
+      IDP_CLIENT_ID: ${{ vars.IDP_CLIENT_ID }}
+      IDP_CLIENT_SECRET: ${{ secrets.IDP_CLIENT_SECRET }}
+
+    steps:
+      - name: Check Hosted Extractor Jobs and Logs
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          from cognite.client import CogniteClient, ClientConfig
+          from cognite.client.credentials import OAuthClientCredentials
+
+          cluster = os.environ["CDF_CLUSTER"]
+          base_url = f"https://{cluster}.cognitedata.com"
+
+          credentials = OAuthClientCredentials(
+              token_url=(
+                  "https://login.microsoftonline.com/"
+                  + os.environ["IDP_TENANT_ID"]
+                  + "/oauth2/v2.0/token"
+              ),
+              client_id=os.environ["IDP_CLIENT_ID"],
+              client_secret=os.environ["IDP_CLIENT_SECRET"],
+              scopes=[f"{base_url}/.default"],
+          )
+
+          client = CogniteClient(
+              ClientConfig(
+                  client_name="prod-extractor-diagnostics",
+                  project=os.environ["CDF_PROJECT"],
+                  credentials=credentials,
+                  base_url=base_url,
+              )
+          )
+
+          print("PROJECT:", client.config.project)
+          print("\n=== HOSTED EXTRACTOR JOBS ===")
+
+          jobs = client.hosted_extractors.jobs.list(limit=100)
+
+          for job in jobs:
+              print(
+                  "JOB:", job.external_id,
+                  "| STATUS:", job.status,
+                  "| TARGET:", job.target_status,
+                  "| SOURCE:", job.source_id,
+                  "| DESTINATION:", job.destination_id,
+              )
+
+          print("\n=== RECENT JOB LOGS ===")
+
+          for job in jobs:
+              print("\nJOB:", job.external_id)
+              logs = client.hosted_extractors.jobs.list_logs(
+                  job=job.external_id,
+                  limit=10,
+              )
+              for log in logs:
+                  print(
+                      "TYPE:", log.type,
+                      "| MESSAGE:", str(log.message or "")[:500],
+                  )
+
+          print("\n=== DIAGNOSIS FINISHED ===")
+          PY
