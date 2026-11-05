@@ -9,6 +9,7 @@ jobs:
     name: Check Hosted Extractor Jobs
     runs-on: ubuntu-latest
     environment: prod
+
     container:
       image: cognite/toolkit:0.6.53
 
@@ -16,110 +17,180 @@ jobs:
       CDF_PROJECT: cdf-bootcamp-41-prod
       CDF_CLUSTER: westeurope-1
       IDP_TENANT_ID: 16e3985b-ebe8-4e24-9da4-933e21a9fc81
+
       IDP_CLIENT_ID: ${{ vars.IDP_CLIENT_ID }}
       IDP_CLIENT_SECRET: ${{ secrets.IDP_CLIENT_SECRET }}
 
+      ICAPI_EXTRACTORS_CLIENT_ID: ${{ vars.ICAPI_EXTRACTORS_CLIENT_ID }}
+      ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
+
     steps:
-      - name: Check Hosted Extractor Jobs and Logs
+      - name: Check Hosted Extractor Jobs and Permissions
         shell: bash
         run: |
           python - <<'PY'
           import os
+          import sys
+          import traceback
+
           from cognite.client import CogniteClient, ClientConfig
           from cognite.client.credentials import OAuthClientCredentials
+          from cognite.client.config import global_config
 
-          cluster = os.environ["CDF_CLUSTER"]
-          base_url = f"https://{cluster}.cognitedata.com"
+          global_config.disable_pypi_version_check = True
 
-          credentials = OAuthClientCredentials(
-              token_url=(
-                  "https://login.microsoftonline.com/"
-                  + os.environ["IDP_TENANT_ID"]
-                  + "/oauth2/v2.0/token"
-              ),
-              client_id=os.environ["IDP_CLIENT_ID"],
-              client_secret=os.environ["IDP_CLIENT_SECRET"],
-              scopes=[f"{base_url}/.default"],
+          PROJECT = os.environ["CDF_PROJECT"]
+          CLUSTER = os.environ["CDF_CLUSTER"]
+          TENANT = os.environ["IDP_TENANT_ID"]
+
+          BASE_URL = f"https://{CLUSTER}.cognitedata.com"
+          TOKEN_URL = (
+              f"https://login.microsoftonline.com/"
+              f"{TENANT}/oauth2/v2.0/token"
           )
 
-          client = CogniteClient(
-              ClientConfig(
-                  client_name="prod-extractor-diagnostics",
-                  project=os.environ["CDF_PROJECT"],
+          def create_client(client_id, client_secret, name):
+              credentials = OAuthClientCredentials(
+                  token_url=TOKEN_URL,
+                  client_id=client_id,
+                  client_secret=client_secret,
+                  scopes=[f"{BASE_URL}/.default"],
+              )
+
+              config = ClientConfig(
+                  client_name=name,
+                  project=PROJECT,
                   credentials=credentials,
-                  base_url=base_url,
-              )
-          )
-
-          print("PROJECT:", client.config.project)
-
-          print("\n=== EXTRACTOR SERVICE ACCOUNT PERMISSIONS ===")
-
-            extractor_credentials = OAuthClientCredentials(
-                token_url=(
-                    "https://login.microsoftonline.com/"
-                    + os.environ["IDP_TENANT_ID"]
-                    + "/oauth2/v2.0/token"
-                ),
-                client_id=os.environ["ICAPI_EXTRACTORS_CLIENT_ID"],
-                client_secret=os.environ["ICAPI_EXTRACTORS_CLIENT_SECRET"],
-                scopes=[f"{base_url}/.default"],
-            )
-
-            extractor_client = CogniteClient(
-                ClientConfig(
-                    client_name="prod-extractor-permission-check",
-                    project=os.environ["CDF_PROJECT"],
-                    credentials=extractor_credentials,
-                    base_url=base_url,
-                )
-            )
-
-            inspection = extractor_client.iam.token.inspect()
-
-            print("Authentication: SUCCESS")
-            print("Project:", extractor_client.config.project)
-
-            relevant = {
-                "dataModelsAcl",
-                "dataModelInstancesAcl",
-                "rawAcl",
-                "timeSeriesAcl",
-            }
-
-            for capability in inspection.dump().get("capabilities", []):
-                if isinstance(capability, dict):
-                    for name, settings in capability.items():
-                        if name in relevant:
-                            print("CAPABILITY:", name)
-                            print("SETTINGS:", settings)
-
-          print("\n=== HOSTED EXTRACTOR JOBS ===")
-
-          jobs = client.hosted_extractors.jobs.list(limit=100)
-
-          for job in jobs:
-              print(
-                  "JOB:", job.external_id,
-                  "| STATUS:", job.status,
-                  "| TARGET:", job.target_status,
-                  "| SOURCE:", job.source_id,
-                  "| DESTINATION:", job.destination_id,
+                  base_url=BASE_URL,
               )
 
-          print("\n=== RECENT JOB LOGS ===")
+              return CogniteClient(config)
 
-          for job in jobs:
-              print("\nJOB:", job.external_id)
-              logs = client.hosted_extractors.jobs.list_logs(
-                  job=job.external_id,
-                  limit=10,
+          def section(title):
+              print()
+              print("=" * 60)
+              print(title)
+              print("=" * 60, flush=True)
+
+          def inspect_permissions(client):
+              inspection = client.iam.token.inspect()
+
+              print("Authentication: SUCCESS")
+              print("Project:", PROJECT)
+
+              relevant = {
+                  "dataModelsAcl",
+                  "dataModelInstancesAcl",
+                  "rawAcl",
+                  "timeSeriesAcl",
+              }
+
+              capabilities = inspection.dump().get(
+                  "capabilities", []
               )
-              for log in logs:
-                  print(
-                      "TYPE:", log.type,
-                      "| MESSAGE:", str(log.message or "")[:500],
-                  )
 
-          print("\n=== DIAGNOSIS FINISHED ===")
+              found = set()
+
+              def inspect_capability(item):
+                  if isinstance(item, dict):
+                      for key, value in item.items():
+                          if key in relevant:
+                              found.add(key)
+                              print("CAPABILITY:", key)
+                              print("SETTINGS:", value)
+
+                          if isinstance(value, (dict, list)):
+                              inspect_capability(value)
+
+                  elif isinstance(item, list):
+                      for value in item:
+                          inspect_capability(value)
+
+              inspect_capability(capabilities)
+
+              for name in sorted(relevant - found):
+                  print("NOT FOUND:", name)
+
+              print("Permission inspection completed.")
+
+          def main():
+              section("PROD DIAGNOSTIC START")
+
+              print("PROJECT:", PROJECT)
+              print("CLUSTER:", CLUSTER)
+
+              admin_client = create_client(
+                  os.environ["IDP_CLIENT_ID"],
+                  os.environ["IDP_CLIENT_SECRET"],
+                  "prod-admin-diagnostics",
+              )
+
+              extractor_client = create_client(
+                  os.environ["ICAPI_EXTRACTORS_CLIENT_ID"],
+                  os.environ["ICAPI_EXTRACTORS_CLIENT_SECRET"],
+                  "prod-extractor-diagnostics",
+              )
+
+              section("EXTRACTOR SERVICE ACCOUNT PERMISSIONS")
+
+              try:
+                  inspect_permissions(extractor_client)
+              except Exception as error:
+                  print("PERMISSION CHECK FAILED")
+                  print("ERROR TYPE:", type(error).__name__)
+                  print("ERROR:", str(error)[:1000])
+
+              section("HOSTED EXTRACTOR JOBS")
+
+              jobs = admin_client.hosted_extractors.jobs.list(
+                  limit=100
+              )
+
+              for job in jobs:
+                  print("JOB:", job.external_id)
+                  print("STATUS:", job.status)
+                  print("TARGET:", job.target_status)
+                  print("SOURCE:", job.source_id)
+                  print("DESTINATION:", job.destination_id)
+                  print("-" * 40)
+
+              section("RECENT JOB LOGS")
+
+              for job in jobs:
+                  print()
+                  print("JOB:", job.external_id)
+
+                  try:
+                      logs = (
+                          admin_client
+                          .hosted_extractors
+                          .jobs
+                          .list_logs(
+                              job=job.external_id,
+                              limit=10,
+                          )
+                      )
+
+                      for log in logs:
+                          print("TYPE:", log.type)
+                          print(
+                              "MESSAGE:",
+                              str(log.message or "")[:500],
+                          )
+                          print("-" * 30)
+
+                  except Exception as error:
+                      print(
+                          "LOG ERROR:",
+                          type(error).__name__,
+                          str(error)[:500],
+                      )
+
+              section("DIAGNOSIS FINISHED")
+
+          try:
+              main()
+          except Exception:
+              traceback.print_exc()
+              sys.exit(1)
           PY
