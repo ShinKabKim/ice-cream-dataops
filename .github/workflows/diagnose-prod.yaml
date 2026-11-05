@@ -25,13 +25,14 @@ jobs:
       ICAPI_EXTRACTORS_CLIENT_SECRET: ${{ secrets.ICAPI_EXTRACTORS_CLIENT_SECRET }}
 
     steps:
-      - name: Check Hosted Extractor Jobs and Permissions
+      - name: Check Jobs Permissions and Destination Sessions
         shell: bash
         run: |
           python - <<'PY'
           import os
           import sys
           import traceback
+          from datetime import datetime, timezone
 
           from cognite.client import CogniteClient, ClientConfig
           from cognite.client.credentials import OAuthClientCredentials
@@ -48,6 +49,12 @@ jobs:
               f"https://login.microsoftonline.com/"
               f"{TENANT}/oauth2/v2.0/token"
           )
+
+          def section(title):
+              print()
+              print("=" * 60)
+              print(title)
+              print("=" * 60, flush=True)
 
           def create_client(client_id, client_secret, name):
               credentials = OAuthClientCredentials(
@@ -66,11 +73,14 @@ jobs:
 
               return CogniteClient(config)
 
-          def section(title):
-              print()
-              print("=" * 60)
-              print(title)
-              print("=" * 60, flush=True)
+          def format_time(milliseconds):
+              if milliseconds is None:
+                  return "N/A"
+
+              return datetime.fromtimestamp(
+                  milliseconds / 1000,
+                  tz=timezone.utc,
+              ).isoformat()
 
           def inspect_permissions(client):
               inspection = client.iam.token.inspect()
@@ -113,6 +123,103 @@ jobs:
 
               print("Permission inspection completed.")
 
+          def inspect_jobs(client):
+              section("HOSTED EXTRACTOR JOBS")
+
+              jobs = client.hosted_extractors.jobs.list(
+                  limit=100
+              )
+
+              for job in jobs:
+                  print("JOB:", job.external_id)
+                  print("STATUS:", job.status)
+                  print("TARGET:", job.target_status)
+                  print("SOURCE:", job.source_id)
+                  print("DESTINATION:", job.destination_id)
+                  print("-" * 40)
+
+              return jobs
+
+          def inspect_logs(client, jobs):
+              section("RECENT JOB LOGS")
+
+              for job in jobs:
+                  print()
+                  print("JOB:", job.external_id)
+
+                  try:
+                      logs = (
+                          client.hosted_extractors.jobs.list_logs(
+                              job=job.external_id,
+                              limit=10,
+                          )
+                      )
+
+                      for log in logs:
+                          print("TYPE:", log.type)
+                          print(
+                              "TIME:",
+                              format_time(
+                                  getattr(log, "created_time", None)
+                              ),
+                          )
+                          print(
+                              "MESSAGE:",
+                              str(log.message or "")[:500],
+                          )
+                          print("-" * 30)
+
+                  except Exception as error:
+                      print(
+                          "LOG ERROR:",
+                          type(error).__name__,
+                          str(error)[:500],
+                      )
+
+          def inspect_destinations(client):
+              section("DESTINATION SESSIONS")
+
+              try:
+                  destinations = (
+                      client.hosted_extractors.destinations.list(
+                          limit=100
+                      )
+                  )
+
+                  for dest in destinations:
+                      print(
+                          "DESTINATION:",
+                          dest.external_id,
+                      )
+                      print(
+                          "SESSION ID:",
+                          getattr(dest, "session_id", None),
+                      )
+                      print(
+                          "LAST UPDATED:",
+                          format_time(
+                              getattr(
+                                  dest,
+                                  "last_updated_time",
+                                  None,
+                              )
+                          ),
+                      )
+                      print(
+                          "TARGET DATA SET ID:",
+                          getattr(
+                              dest,
+                              "target_data_set_id",
+                              None,
+                          ),
+                      )
+                      print("-" * 40)
+
+              except Exception as error:
+                  print("DESTINATION CHECK FAILED")
+                  print("ERROR TYPE:", type(error).__name__)
+                  print("ERROR:", str(error)[:1000])
+
           def main():
               section("PROD DIAGNOSTIC START")
 
@@ -140,51 +247,11 @@ jobs:
                   print("ERROR TYPE:", type(error).__name__)
                   print("ERROR:", str(error)[:1000])
 
-              section("HOSTED EXTRACTOR JOBS")
+              jobs = inspect_jobs(admin_client)
 
-              jobs = admin_client.hosted_extractors.jobs.list(
-                  limit=100
-              )
+              inspect_logs(admin_client, jobs)
 
-              for job in jobs:
-                  print("JOB:", job.external_id)
-                  print("STATUS:", job.status)
-                  print("TARGET:", job.target_status)
-                  print("SOURCE:", job.source_id)
-                  print("DESTINATION:", job.destination_id)
-                  print("-" * 40)
-
-              section("RECENT JOB LOGS")
-
-              for job in jobs:
-                  print()
-                  print("JOB:", job.external_id)
-
-                  try:
-                      logs = (
-                          admin_client
-                          .hosted_extractors
-                          .jobs
-                          .list_logs(
-                              job=job.external_id,
-                              limit=10,
-                          )
-                      )
-
-                      for log in logs:
-                          print("TYPE:", log.type)
-                          print(
-                              "MESSAGE:",
-                              str(log.message or "")[:500],
-                          )
-                          print("-" * 30)
-
-                  except Exception as error:
-                      print(
-                          "LOG ERROR:",
-                          type(error).__name__,
-                          str(error)[:500],
-                      )
+              inspect_destinations(admin_client)
 
               section("DIAGNOSIS FINISHED")
 
