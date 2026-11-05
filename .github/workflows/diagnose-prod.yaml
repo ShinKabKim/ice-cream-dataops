@@ -79,14 +79,15 @@ jobs:
                       "| MESSAGE:", str(log.message or "")[:500],
                   )
 
-          print("\n=== DESTINATION CLIENT ID CHECK ===")
 
-          for destination_id in ["ICAPI Time series", "ICAPI Assets"]:
-              destination = client.hosted_extractors.destinations.retrieve(
-                   external_id=destination_id
-              )
-          print("DESTINATION:", destination_id)
-          print("CLIENT ID:", destination.credentials.client_id)
+                  print("\n=== DESTINATION CLIENT ID CHECK ===")
+
+for destination_id in ["ICAPI Time series", "ICAPI Assets"]:
+    destination = client.hosted_extractors.destinations.retrieve(
+        external_id=destination_id
+    )
+    print("DESTINATION:", destination_id)
+    print("CLIENT ID:", destination.credentials.client_id)
 
           print("\n=== DIAGNOSIS FINISHED ===")
           PY
